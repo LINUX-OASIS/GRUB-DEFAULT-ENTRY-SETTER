@@ -67,20 +67,20 @@ The script includes pre-flight checks to ensure a safe run:
 
 ## 💬 Contributing
 
-Pull requests, issues, and suggestions are warmly welcomed!
+[Pull requests](https://github.com/LINUX-OASIS/GRUB-DEFAULT-ENTRY-SETTER/pulls), [issues](https://github.com/LINUX-OASIS/GRUB-DEFAULT-ENTRY-SETTER/issues), and suggestions are warmly welcomed!
 
-For major changes, please open an issue first to discuss what you would like to change. See CONTRIBUTING.md for development guidelines.
+For major changes, please open an [issue](https://github.com/LINUX-OASIS/GRUB-DEFAULT-ENTRY-SETTER/issues/new/choose) first to discuss what you would like to change. See [CONTRIBUTING.md](CONTRIBUTING.md) for development guidelines.
 
 ## 🌐 Links
 
-*   Report an Issue
-*   Open a Pull Request
-*   View Releases
-*   Project Wiki
+*   [Report an Issue](https://github.com/LINUX-OASIS/GRUB-DEFAULT-ENTRY-SETTER/issues/new/choose)
+*   [Open a Pull Request](https://github.com/LINUX-OASIS/GRUB-DEFAULT-ENTRY-SETTER/pulls)
+*   [View Releases](https://github.com/LINUX-OASIS/GRUB-DEFAULT-ENTRY-SETTER/releases)
+*   [Project Wiki](https://github.com/LINUX-OASIS/GRUB-DEFAULT-ENTRY-SETTER/wiki)
 
 ## 🧙‍♂️ Maintainer
 
-*   **LINUX-OASIS**
+*   [**LINUX-OASIS**](https://github.com/LINUX-OASIS)
 
 ## 📜 License
 
