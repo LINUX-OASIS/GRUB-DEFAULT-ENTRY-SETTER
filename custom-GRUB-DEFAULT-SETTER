@@ -1,0 +1,390 @@
+#!/bin/bash
+
+# =============================================================================
+# GRUB Default Setter - A TUI Script
+#
+# This script provides a user-friendly Terminal User Interface (TUI) using
+# whiptail to allow the user to select and set the default boot entry for
+# the GRUB bootloader.
+#
+# It automatically detects available boot options, presents them in a clean,
+# numbered list, and handles the configuration file update safely.
+# =============================================================================
+
+# =============================================================================
+# SECTION 1: AESTHETICS - Whiptail Color Scheme
+# =============================================================================
+# Whiptail, the program used for the TUI, is built on a library called `newt`.
+# This `NEWT_COLORS` environment variable allows us to override the default
+# color scheme to create a more visually appealing interface.
+export NEWT_COLORS='
+root=brown,yellow
+window=brightblue,white
+dialog=red,brightmagenta
+frame=magenta,brightmagenta
+border=magenta,lightgray
+shadow=brightblue,gray
+title=blue,lightgray
+button=brightmagenta,blue
+actbutton=lightgray,black
+focus=black,brightmagenta
+highlight=brightgreen,brightblue
+checkbox=gray,brightred
+actcheckbox=cyan,lightgray
+compactbutton=green,magenta
+radiobutton=brightmagenta,cyan
+textbox=white,black
+acttextbox=magenta,blue
+text=green,brightmagenta
+infobox=cyan,brown
+label=green,brightgreen
+roottext=brightmagenta,magenta
+helpline=gray,black
+menu=yellow,red
+menuitem=red,brightmagenta
+listbox=red,lightgray
+actlistbox=lightgray,black
+item=lightgray,green
+actsellistbox=black,yellow
+sellistbox=brightmagenta,red
+scrollbar=red,brightmagenta
+statusbar=brightblue,cyan
+cursor=brightgreen,green
+entry=lightgray,brightgreen
+disentry=green,brown
+emptyscale=lightgray,red
+fullscale=brightred,yellow
+'
+
+# =============================================================================
+# SECTION 2: PRE-FLIGHT CHECKS - Ensuring a Safe Run
+# =============================================================================
+
+# --- Check 1: Root Privileges ---
+# Modifying GRUB configuration requires administrator (root) permissions.
+# This check sees if the script's Effective User ID (`$EUID`) is `0` (root's ID).
+# If it's not, the script re-launches itself using `sudo` to gain the
+# necessary permissions. This makes it more user-friendly than just failing.
+if [[ $EUID -ne 0 ]]; then
+    echo "This script must be run as root. Re-executing with sudo..."
+    # "$0" is a special variable that holds the name of the script itself.
+    sudo "$0"
+    # After the sudo command finishes, the original non-root script exits.
+    exit 0
+fi
+
+# --- Check 2: Whiptail Installation ---
+# The entire TUI depends on the `whiptail` command.
+# `command -v` is a reliable way to check if a command exists in the system's PATH.
+# We redirect both stdout and stderr (`&>`) to `/dev/null` to hide any output.
+if ! command -v whiptail &>/dev/null; then
+    echo "Error: whiptail is not installed. This program is required for the UI."
+    echo "On Debian/Ubuntu, you can install it with: sudo apt-get install whiptail"
+    exit 1
+fi
+
+#  =============================================================================
+# SECTION 3:  CHOOSE FORMAT
+# =============================================================================
+
+_MASTER_GRUB_MENU_FORMAT_CHOICE=$(whiptail --fb --title "GRUB Format" --menu "Choose the format for GRUB entries: for /etc/default/grub GRUB_DEFAULT=XXXX" 0 0 2 \
+    "1" "Format: Advanced options for Distro>Distro, with Linux 6X.11X.0-17X-XXgeneric" \
+    "2" "Format: Distro, with Linux 6X.11X.0-17X-XXgeneric>gnulinux-6X.11X.0-17X-generic-advanced-uuid{UUIIDD}" \
+    3>&1 1>&2 2>&3)
+
+exitstatus=$?
+if [ $exitstatus != 0 ]; then
+    whiptail --fullbuttons --title "Cancelled" --msgbox "Operation cancelled. No changes were made." 0 0
+    exit 0
+fi
+
+# =============================================================================
+# SECTION 4: DATA GATHERING - Finding the GRUB Entries
+# =============================================================================
+
+if [[ $_MASTER_GRUB_MENU_FORMAT_CHOICE == 1 ]]; then
+
+    # --- Menu Preparation ---
+    # `options` will be a simple array holding the menu choices for whiptail.
+    # Whiptail expects data in pairs: a "tag" (what it returns) and an "item" (what it displays).
+    # Example: ("1" "Ubuntu" "2" "Windows")
+    options=()
+
+    # `id_map` will be an associative array (like a dictionary or hash map).
+    # It acts as a lookup table to map the simple numeric tag (e.g., "1") back to the
+    # full, complex GRUB ID string that GRUB actually understands.
+    declare -A id_map
+
+    # Initialize a counter for our numbered list.
+    i=1
+
+    # --- The Main Data Extraction Pipeline ---
+    # This `while` loop processes the output of a command pipeline line-by-line.
+    # `IFS=` prevents the shell from trimming leading/trailing whitespace from lines.
+    # `-r` prevents backslash escapes from being interpreted, ensuring data is read literally.
+    while IFS= read -r line; do
+        # This check ensures we don't add any blank lines to our menu.
+        if [[ -n "$line" ]]; then
+            # Add the number (tag) and the GRUB ID (item) to our options array.
+            options+=("$i" "$line")
+            # Store the mapping from the number to the full ID in our lookup table.
+            id_map[$i]="$line"
+            # Increment the counter for the next menu item.
+            ((i++))
+        fi
+        # The `< <(...)` is Process Substitution. It runs the command pipeline inside the
+        # parentheses and feeds its output into the `while` loop as if it were a file.
+        #
+        # THE PIPELINE EXPLAINED:
+        # 1. `grep 'menuentry_id_option' /boot/grub/grub.cfg`:
+        #    Finds all lines in the GRUB config that contain the string `menuentry_id_option`.
+        #    These lines define the advanced menu entries (like specific kernel versions).
+        #
+        # 2. `awk -F'$menuentry_id_option' '{print $2}'`:
+        #    `awk` processes the lines found by `grep`. We tell it to use the literal string
+        #    `$menuentry_id_option` as a field separator (`-F`). It then prints the second
+        #    field (`{print $2}`), which is the text that comes *after* our separator.
+        #
+        # 3. `sed "s/^ '//;s/' {$//g"`:
+        #    `sed` performs two substitutions to clean up the string from `awk`.
+        #    a) `s/^ '//`: Removes the leading space and single quote (` '`) from the start (`^`).
+        #    b) `s/' {$//g`: Removes the trailing single quote and curly brace (`' {`) from the end (`$`).
+        #
+        # 4. `sed '/^$/d'`:
+        #    This final `sed` command deletes (`d`) any lines that are completely empty (`/^$/`),
+        #    ensuring we don't have blank spots in our menu.
+    done < <(grep 'menuentry' /boot/grub/grub.cfg | awk -F "['\"]" '/menuentry / {print $2}' | sed '/^$/d')
+
+    # grep 'menuentry' /boot/grub/grub.cfg | awk -F "['\"]" '/menuentry / {print $2}' | tail -n +2 ^^^
+
+    # --- Sanity Check ---
+    # If the pipeline above produced no entries, the `options` array will be empty.
+    # We must check for this and exit gracefully if no boot entries were found.
+    if [ ${#options[@]} -eq 0 ]; then
+        whiptail --title "Error" --msgbox "Could not find any GRUB menu entries. Please check your GRUB configuration. Exiting." 10 78
+        exit 1
+    fi
+
+    # =============================================================================
+    # SECTION 4: USER INTERACTION - The TUI Menu
+    # =============================================================================
+
+    # Display the main menu.
+    # The `3>&1 1>&2 2>&3` is a shell redirection trick. Whiptail draws its UI on
+    # stderr (file descriptor 2) and sends its final output (the chosen tag) there too.
+    # To capture the output in a variable (`CHOICE_NUM`), we need to temporarily swap
+    # stdout (1) and stderr (2) so the output goes to the original stdout, which we can capture.
+    CHOICE_NUM=$(whiptail --fb --title "GRUB Boot Menu Setter" --menu "Choose the default GRUB boot entry:" 0 0 "${#options[@]}" \
+        "${options[@]}" \
+        3>&1 1>&2 2>&3)
+
+    # `$?` holds the exit status of the last command.
+    # For whiptail, `0` means the user pressed "OK". Any other value means "Cancel" or Esc.
+    exitstatus=$?
+    if [ $exitstatus = 0 ]; then
+        # --- User selected "OK" ---
+
+        # Use the number from the menu (`CHOICE_NUM`) to look up the full GRUB ID in our map.
+        FINAL_CHOICE="${id_map[$CHOICE_NUM]}"
+
+        # --- Get the User-Friendly Menu Name ---
+        # This pipeline finds the main, human-readable name for the chosen entry.
+        # This is crucial to avoid the duplication bug where the submenu ID was appended.
+        # 1. `grep "$FINAL_CHOICE"`: Finds the line containing our specific advanced menu ID.
+        # 2. `awk -F"['\"]"`: Uses either a single or double quote as a delimiter.
+        # 3. `sed 's/>.*//'`: This is the key! It removes the `>` and everything after it,
+        #    isolating the main menu title from any submenu path.
+        # 4. `sed '/^$/d' | head -n 1`: Cleans up blank lines and ensures we only get one result.
+
+        _MAIN_MENU_ID=$(grep 'submenu' /boot/grub/grub.cfg | awk -F "['\"]" '{print $2}' | sed '/^$/d')
+
+        # special menu entry detection
+        if echo $FINAL_CHOICE | grep -q "memtest86+x64\|UEFI Firmware Settings"; then
+            # If the user selected a special entry like "memtest86+x64" or "UEFI Firmware Settings",
+            # we need to handle it differently since these entries do not have a submenu.
+            # We can directly use the FINAL_CHOICE as the main menu ID.
+            _MAIN_MENU_ID="${FINAL_CHOICE}"
+        # else
+        #     # Otherwise, we extract the main menu ID from the full choice.
+        #     _MAIN_MENU_ID=$(echo "${FINAL_CHOICE}" | sed 's/>.*//')
+        fi
+
+        # # --- Debugging Output ---
+        echo "DEBUG: Main Menu ID: ${_MAIN_MENU_ID}"
+        echo "DEBUG: Final Choice: ${FINAL_CHOICE}"
+
+        # --- Final Confirmation Dialog ---
+        # This is a final sanity check before making any system changes.
+        if (whiptail --fullbuttons --title "Confirm Changes" --yesno "This will modify the file: /etc/default/grub\n\nIt will set the default boot entry to:\n\n${_MAIN_MENU_ID}>${FINAL_CHOICE}\n\nAre you sure you want to proceed?" 0 0); then
+            # --- User selected "Yes" ---
+
+            # =============================================================================
+            # SECTION 5: SYSTEM MODIFICATION
+            # =============================================================================
+
+            # --- Modify the /etc/default/grub file ---
+            # `sed -i.bak`: Modifies the file "in-place" (`-i`) and creates a backup
+            #               of the original file named `/etc/default/grub.bak`.
+            # The regex `s/^\s*(#\s*)?GRUB_DEFAULT=.*/.../` is robust:
+            # `^\s*`       - Matches any whitespace at the beginning of the line.
+            # `(#\s*)?`    - Optionally matches a `#` and any following whitespace (for commented-out lines).
+            # `GRUB_DEFAULT=.*` - Matches the rest of the line.
+            # This whole line is then replaced with the new, correct default value.
+            sed -i.bak -E "s/^\s*(#\s*)?GRUB_DEFAULT=.*/GRUB_DEFAULT=\"${_MAIN_MENU_ID}>${FINAL_CHOICE}\"/" /etc/default/grub
+
+            # --- Apply the Changes ---
+            # `update-grub` is the standard system command that reads `/etc/default/grub`
+            # and generates the final `/boot/grub/grub.cfg` file used at boot time.
+            update-grub
+
+            # --- Success Message ---
+            whiptail --fullbuttons --title "Success" --msgbox "GRUB default has been set to:\n\n${_MAIN_MENU_ID}>${FINAL_CHOICE}\n\n'update-grub' has been run to apply the changes." 0 0
+        else
+            # User selected "No" from the confirmation dialog.
+            whiptail --fullbuttons --title "Cancelled" --msgbox "Operation cancelled. No changes were made." 0 0
+        fi
+    else
+        # User selected "Cancel" from the main menu.
+        whiptail --fullbuttons --title "Cancelled" --msgbox "Operation cancelled. No changes were made." 0 0
+    fi
+
+fi
+
+if [[ $_MASTER_GRUB_MENU_FORMAT_CHOICE == 2 ]]; then
+
+    # --- Menu Preparation ---
+    # `options` will be a simple array holding the menu choices for whiptail.
+    # Whiptail expects data in pairs: a "tag" (what it returns) and an "item" (what it displays).
+    # Example: ("1" "Ubuntu" "2" "Windows")
+    options=()
+
+    # `id_map` will be an associative array (like a dictionary or hash map).
+    # It acts as a lookup table to map the simple numeric tag (e.g., "1") back to the
+    # full, complex GRUB ID string that GRUB actually understands.
+    declare -A id_map
+
+    # Initialize a counter for our numbered list.
+    i=1
+
+    # --- The Main Data Extraction Pipeline ---
+    # This `while` loop processes the output of a command pipeline line-by-line.
+    # `IFS=` prevents the shell from trimming leading/trailing whitespace from lines.
+    # `-r` prevents backslash escapes from being interpreted, ensuring data is read literally.
+    while IFS= read -r line; do
+        # This check ensures we don't add any blank lines to our menu.
+        if [[ -n "$line" ]]; then
+            # Add the number (tag) and the GRUB ID (item) to our options array.
+            options+=("$i" "$line")
+            # Store the mapping from the number to the full ID in our lookup table.
+            id_map[$i]="$line"
+            # Increment the counter for the next menu item.
+            ((i++))
+        fi
+        # The `< <(...)` is Process Substitution. It runs the command pipeline inside the
+        # parentheses and feeds its output into the `while` loop as if it were a file.
+        #
+        # THE PIPELINE EXPLAINED:
+        # 1. `grep 'menuentry_id_option' /boot/grub/grub.cfg`:
+        #    Finds all lines in the GRUB config that contain the string `menuentry_id_option`.
+        #    These lines define the advanced menu entries (like specific kernel versions).
+        #
+        # 2. `awk -F'$menuentry_id_option' '{print $2}'`:
+        #    `awk` processes the lines found by `grep`. We tell it to use the literal string
+        #    `$menuentry_id_option` as a field separator (`-F`). It then prints the second
+        #    field (`{print $2}`), which is the text that comes *after* our separator.
+        #
+        # 3. `sed "s/^ '//;s/' {$//g"`:
+        #    `sed` performs two substitutions to clean up the string from `awk`.
+        #    a) `s/^ '//`: Removes the leading space and single quote (` '`) from the start (`^`).
+        #    b) `s/' {$//g`: Removes the trailing single quote and curly brace (`' {`) from the end (`$`).
+        #
+        # 4. `sed '/^$/d'`:
+        #    This final `sed` command deletes (`d`) any lines that are completely empty (`/^$/`),
+        #    ensuring we don't have blank spots in our menu.
+    done < <(grep 'menuentry_id_option' /boot/grub/grub.cfg | awk -F'\$menuentry_id_option' '{print $2}' | sed "s/^ '//;s/' {$//g" | sed '/^$/d')
+
+    # --- Sanity Check ---
+    # If the pipeline above produced no entries, the `options` array will be empty.
+    # We must check for this and exit gracefully if no boot entries were found.
+    if [ ${#options[@]} -eq 0 ]; then
+        whiptail --title "Error" --msgbox "Could not find any GRUB menu entries. Please check your GRUB configuration. Exiting." 10 78
+        exit 1
+    fi
+
+    # =============================================================================
+    # SECTION 4: USER INTERACTION - The TUI Menu
+    # =============================================================================
+
+    # Display the main menu.
+    # The `3>&1 1>&2 2>&3` is a shell redirection trick. Whiptail draws its UI on
+    # stderr (file descriptor 2) and sends its final output (the chosen tag) there too.
+    # To capture the output in a variable (`CHOICE_NUM`), we need to temporarily swap
+    # stdout (1) and stderr (2) so the output goes to the original stdout, which we can capture.
+    CHOICE_NUM=$(whiptail --fb --title "GRUB Boot Menu Setter" --menu "Choose the default GRUB boot entry:" 0 0 "${#options[@]}" \
+        "${options[@]}" \
+        3>&1 1>&2 2>&3)
+
+    # `$?` holds the exit status of the last command.
+    # For whiptail, `0` means the user pressed "OK". Any other value means "Cancel" or Esc.
+    exitstatus=$?
+    if [ $exitstatus = 0 ]; then
+        # --- User selected "OK" ---
+
+        # Use the number from the menu (`CHOICE_NUM`) to look up the full GRUB ID in our map.
+        FINAL_CHOICE="${id_map[$CHOICE_NUM]}"
+
+        # --- Get the User-Friendly Menu Name ---
+        # This pipeline finds the main, human-readable name for the chosen entry.
+        # This is crucial to avoid the duplication bug where the submenu ID was appended.
+        # 1. `grep "$FINAL_CHOICE"`: Finds the line containing our specific advanced menu ID.
+        # 2. `awk -F"['\"]"`: Uses either a single or double quote as a delimiter.
+        # 3. `sed 's/>.*//'`: This is the key! It removes the `>` and everything after it,
+        #    isolating the main menu title from any submenu path.
+        # 4. `sed '/^$/d' | head -n 1`: Cleans up blank lines and ensures we only get one result.
+        # the first _MAIN_MENU_ID variable will use the format: "Ubuntu, with Linux kernel-version>kernel-option-version-uuid"
+        # NOTED: commented out for now, sometimes issues with the the grub ignoring and booting into the latest kernel)
+
+        _MAIN_MENU_ID=$(grep "$FINAL_CHOICE" /boot/grub/grub.cfg | awk -F"['\"]" '{print $2}' | sed 's/>.*//' | sed '/^$/d' | head -n 1)
+
+        echo "Main Menu ID: ${_MAIN_MENU_ID}"
+        echo "Final Choice: ${FINAL_CHOICE}"
+
+        # --- Final Confirmation Dialog ---
+        # This is a final sanity check before making any system changes.
+        if (whiptail --fullbuttons --title "Confirm Changes" --yesno "This will modify the file: /etc/default/grub\n\nIt will set the default boot entry to:\n\n${_MAIN_MENU_ID}>${FINAL_CHOICE}\n\nAre you sure you want to proceed?" 0 0); then
+            # --- User selected "Yes" ---
+
+            # =============================================================================
+            # SECTION 5: SYSTEM MODIFICATION
+            # =============================================================================
+
+            # --- Modify the /etc/default/grub file ---
+            # `sed -i.bak`: Modifies the file "in-place" (`-i`) and creates a backup
+            #               of the original file named `/etc/default/grub.bak`.
+            # The regex `s/^\s*(#\s*)?GRUB_DEFAULT=.*/.../` is robust:
+            # `^\s*`       - Matches any whitespace at the beginning of the line.
+            # `(#\s*)?`    - Optionally matches a `#` and any following whitespace (for commented-out lines).
+            # `GRUB_DEFAULT=.*` - Matches the rest of the line.
+            # This whole line is then replaced with the new, correct default value.
+            sed -i.bak -E "s/^\s*(#\s*)?GRUB_DEFAULT=.*/GRUB_DEFAULT=\"${_MAIN_MENU_ID}>${FINAL_CHOICE}\"/" /etc/default/grub
+
+            # --- Apply the Changes ---
+            # `update-grub` is the standard system command that reads `/etc/default/grub`
+            # and generates the final `/boot/grub/grub.cfg` file used at boot time.
+            update-grub
+
+            # --- Success Message ---
+            whiptail --fullbuttons --title "Success" --msgbox "GRUB default has been set to:\n\n${_MAIN_MENU_ID}>${FINAL_CHOICE}\n\n'update-grub' has been run to apply the changes." 0 0
+        else
+            # User selected "No" from the confirmation dialog.
+            whiptail --fullbuttons --title "Cancelled" --msgbox "Operation cancelled. No changes were made." 0 0
+        fi
+    else
+        # User selected "Cancel" from the main menu.
+        whiptail --fullbuttons --title "Cancelled" --msgbox "Operation cancelled. No changes were made." 0 0
+    fi
+
+fi
+# =============================================================================
+# END OF SCRIPT
+# =============================================================================
